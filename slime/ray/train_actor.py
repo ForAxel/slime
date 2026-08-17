@@ -72,9 +72,8 @@ class TrainRayActor(RayActor):
         args.world_size = dist.get_world_size()
 
         try:
-            if torch.version.hip is not None:
-                logger.info("Detected ROCm/HIP environment, skipping NUMA affinity setup")
-                # will find the coresponding API to implement ROCm version as below
+            if not accelerator.supports("nvml_affinity"):
+                logger.info("Accelerator does not support NVML NUMA affinity setup; skipping")
             else:
                 import pynvml
 

@@ -111,8 +111,8 @@ def main():
     init(args)
 
     # if using AMD gpus, we have to do the conversion in cpu
-    if hasattr(torch.version, "hip") and torch.version.hip is not None:
-        assert args.use_cpu_initialization, "AMD GPU requires --use_cpu_initialization=True"
+    if accelerator.supports("requires_cpu_initialization"):
+        assert args.use_cpu_initialization, "The selected accelerator requires --use_cpu_initialization=True"
 
     model = get_model(get_model_provider_func(args), ModelType.encoder_or_decoder, wrap_with_ddp=False)
 

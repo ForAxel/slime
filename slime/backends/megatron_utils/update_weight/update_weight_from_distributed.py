@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import time
 from argparse import Namespace
@@ -336,6 +337,12 @@ def update_weights_from_distributed(
     """
     Send metadata through Ray and tensors through the configured transport.
     """
+    comm_mode = os.environ.get("UPDATE_MODE", "broadcast")
+    if comm_mode == "p2p-broadcast":
+        group_rank = group.rank()
+        global_rank = dist.get_global_rank(group, group_rank)
+    else:
+        global_rank = None
     refs = [
         engine.update_weights_from_distributed.remote(
             names=[name for name, _ in converted_named_tensors],
@@ -348,8 +355,21 @@ def update_weights_from_distributed(
         for engine in rollout_engines
     ]
     handles = []
-    for _, param in converted_named_tensors:
-        handles.append(dist.broadcast(param.data, 0, group=group, async_op=True))
+    if comm_mode == "broadcast":
+        for _, param in converted_named_tensors:
+            handles.append(dist.broadcast(param.data, 0, group=group, async_op=True))
+    elif comm_mode == "gloo-broadcast":
+        for _, param in converted_named_tensors:
+            dist.broadcast(param.data.cpu(), 0, group=group, async_op=False)
+    elif comm_mode == "sync-broadcast":
+        for _, param in converted_named_tensors:
+            dist.broadcast(param.data, 0, group=group, async_op=False)
+    elif comm_mode == "p2p-broadcast":
+        if global_rank == 0:
+            for tag, (_, param) in enumerate(converted_named_tensors):
+                dist.send(param.data, 1, group=group, tag=tag)
+    else:
+        raise NotImplementedError(f"Unknown UPDATE_MODE={comm_mode!r}")
     for handle in handles:
         handle.wait()
 

@@ -42,6 +42,8 @@ def weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> t
 
 
 def main(fp8_path, bf16_path):
+    if not accelerator.supports("triton_kernels"):
+        raise RuntimeError("fp8_cast_bf16 requires an accelerator with supported Triton kernels")
     torch.set_default_dtype(torch.bfloat16)
     os.makedirs(bf16_path, exist_ok=True)
     os.system("cp -rf " + fp8_path + "/config.json " + bf16_path)

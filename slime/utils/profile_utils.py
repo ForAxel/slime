@@ -140,10 +140,7 @@ class _TorchMemoryProfiler(_BaseMemoryProfiler):
             memory_module._dump_snapshot(str(self._path_dump))
             print_memory("when oom")
 
-        attach_oom_observer = getattr(torch._C, "_cuda_attach_out_of_memory_observer", None)
-        if attach_oom_observer is not None:
-            attach_oom_observer(oom_observer)
-        else:
+        if not accelerator.attach_oom_observer(oom_observer):
             logger.warning("Accelerator OOM observer is unavailable; memory snapshot on OOM is disabled.")
 
     def stop(self):

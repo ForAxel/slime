@@ -207,6 +207,8 @@ def process_file(input_path, output_path, filename, group_size, is_symmetric, ig
 
 
 def convert_int4(input_path, output_path, group_size, is_symmetric, ignore_rules, max_workers):
+    if not accelerator.supports("cuda_int4_extension"):
+        raise RuntimeError("INT4 direct conversion requires the CUDA fake_int4_quant extension")
     input_path = os.path.abspath(input_path)
     os.makedirs(output_path, exist_ok=True)
     for filename in os.listdir(input_path):

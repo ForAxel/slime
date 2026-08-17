@@ -5,6 +5,8 @@ from megatron.training.arguments import parse_args as _megatron_parse_args
 from megatron.training.arguments import validate_args as _megatron_validate_args
 from transformers import AutoConfig
 
+from slime.utils import accelerator
+
 try:
     from megatron.core.tokenizers.utils.build_tokenizer import vocab_size_with_padding as _vocab_size_with_padding
 except ImportError:
@@ -75,6 +77,7 @@ def _is_moe_config(hf_config):
 
 def validate_args(args):
     """Run megatron's own validate_args plus slime-specific megatron validations."""
+    accelerator.post_import_torch()
 
     _megatron_validate_args(args)
 
