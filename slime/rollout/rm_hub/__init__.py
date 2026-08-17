@@ -88,6 +88,25 @@ async def async_rm(args, sample: Sample, **kwargs):
         from .ifbench import compute_ifbench_reward
 
         return compute_ifbench_reward(response, label, metadata=metadata)
+    elif rm_type == "zero2one":
+        from .zero2one_reward import compute_score
+
+        if isinstance(label, dict):
+            if "ground_truth" in label:
+                label = label["ground_truth"]
+            elif "answer" in label:
+                label = label["answer"]
+            else:
+                raise ValueError("zero2one reward label must contain 'ground_truth' or 'answer'.")
+
+        result = compute_score(
+            solution_str=response,
+            ground_truth=label,
+            data_source=metadata.get("data_source", "zero2one"),
+            extra_info=metadata,
+            **kwargs,
+        )
+        return result["accuracy_score"]
     elif rm_type == "random":
         return random.randint(0, 1)
     elif rm_type:
