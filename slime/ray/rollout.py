@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 class RolloutManager:
     """Generate and convert batches, borrowing internal engines from serving.
 
-    The serving owner retains engines and queue state across manager death.
+    The serving owner retains engines and queue state across manager death
+    unless --disable-retain-serving scopes it to the Ray job.
     Recovery retains raw/global converted batches across trainer death. This
     manager owns transient readers, conversion and the current trainer's shards.
     """
