@@ -27,8 +27,8 @@ RECOVERY_NAMESPACE = "slime-training-recovery"
 
 
 def training_recovery_enabled(args):
-    # Serving is always retained internally. Trainer replay additionally needs
-    # durable batches, regardless of the legacy --use-fault-tolerance flag.
+    # Retaining serving across jobs is the default. Trainer replay additionally
+    # needs durable batches, regardless of the legacy --use-fault-tolerance flag.
     replay_storage = (
         getattr(args, "rollout_data_transport", "object-store") == "straw"
         or getattr(args, "save_debug_rollout_data", None) is not None
@@ -116,6 +116,7 @@ def retained_rollout_configuration(args):
         "ddp_bucket_size",
         "ddp_num_buckets",
         "use_fault_tolerance",
+        "retain_serving",
         "distributed_backend",
         "distributed_timeout_minutes",
         "rank",
@@ -156,10 +157,10 @@ def retained_rollout_configuration(args):
 
 
 def training_session_name(args):
-    """Find the same named actors across drivers without depending on trainer layout.
+    """Name retained serving actors without depending on the trainer layout.
 
     Prefer an explicit ID or persistent run path. The configuration fallback
-    lets runs without replay storage retain their serving cluster as well.
+    also gives jobs without replay storage a stable retained identity.
     """
     if identity := getattr(args, "rollout_session_id", None):
         identity = "explicit:" + identity

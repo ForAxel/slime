@@ -33,7 +33,7 @@ class ServingDeployment:
 
 @ray.remote
 class ServingCluster:
-    """A named, detached owner for routers, engines and their GPU placements."""
+    """Own routers, engines and GPU placements for a job or retained session."""
 
     def __init__(self, args, restore_plan):
         from slime.backends.sglang_utils.deployment import start_rollout_servers
@@ -56,7 +56,7 @@ class ServingCluster:
         self._ci_fault_injection_pending = args.ci_test
         existing_children = {process.pid for process in multiprocessing.active_children()}
         try:
-            # Constructor failure must release partial topology too. A detached
+            # Constructor failure must release partial topology too. A retained
             # actor can fail before any driver obtains a usable deployment.
             self.placements = create_placement_groups(args)
             try:

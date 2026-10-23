@@ -107,8 +107,8 @@ def execute_train(
     external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
-    # Launching another trainer must preserve independently owned serving.
-    # Successful training cleans up its own resources; failures retain them.
+    # Launching another trainer must preserve the Ray head. Serving survives a
+    # failure unless --disable-retain-serving opts into job-scoped ownership.
     if not external_ray:
         # A manual trainer restart must leave the Ray head and its detached
         # rollout session alive. A stale address file alone is not proof of a

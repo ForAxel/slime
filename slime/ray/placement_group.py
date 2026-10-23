@@ -254,7 +254,8 @@ class RolloutStartup:
     def close(self, *, failed):
         timeout = getattr(self.args, "rollout_cleanup_timeout", 60)
         with Cleanup(timeout) as cleanup:
-            if failed and self.serving is not None:
+            retain_serving = getattr(self.args, "retain_serving", True)
+            if failed and retain_serving and self.serving is not None:
                 # A live but wedged manager must not prevent the independent
                 # serving owner from releasing this driver's training actors.
                 if self.manager is not None:
@@ -272,8 +273,9 @@ class RolloutStartup:
                 )
                 return
 
-            # Successful completion disposes both owners independently. A
-            # broken custom source/manager cannot skip engine or PG cleanup.
+            # Successful completion, or any failure with retention explicitly
+            # disabled, disposes both owners independently. A broken custom
+            # source/manager cannot skip engine or PG cleanup.
             for name, actor, fraction in (("manager", self.manager, 0.5), ("serving", self.serving, 1)):
                 if actor is not None:
                     timeout = cleanup.remaining * fraction
@@ -302,7 +304,7 @@ def create_rollout_manager(args, *, restore_plan=None):
         try:
             startup.close(failed=True)
         except Exception:
-            logger.exception("Failed to detach partially started training")
+            logger.exception("Failed to clean up partially started training")
         raise
     return startup
 
@@ -320,17 +322,18 @@ def _attach_rollout_manager(startup):
     args, restore_plan = startup.args, startup.restore_plan
     serving = None
     deployment = None
+    retain_serving = bool(getattr(args, "retain_serving", True))
+    session_name = None
     if args.rollout_external:
         # External serving retains its existing startup and ownership contract.
         placements = startup.placements = create_placement_groups(args)
-    else:
-        # Ray resolves these stable names in one namespace. Reuse the detached
-        # owner first, then recreate/attach the manager against its deployment;
-        # manager death never requires discovering individual router processes.
-        name = training_session_name(args)
+    elif retain_serving:
+        # Default recovery mode: stable names let a later job find and reuse
+        # the serving processes and queue state after this job exits.
+        session_name = training_session_name(args)
         serving = startup.serving = ServingCluster.options(
             **options,
-            name=name + ":serving",
+            name=session_name + ":serving",
             namespace=RECOVERY_NAMESPACE,
             lifetime="detached",
             get_if_exists=True,
@@ -342,7 +345,21 @@ def _attach_rollout_manager(startup):
         startup.placements = placements
         for key, value in deployment.routers.items():
             setattr(args, key, value)
-        options.update(name=name, namespace=RECOVERY_NAMESPACE, lifetime="detached", get_if_exists=True)
+        options.update(
+            name=session_name,
+            namespace=RECOVERY_NAMESPACE,
+            lifetime="detached",
+            get_if_exists=True,
+        )
+    else:
+        # Explicit --disable-retain-serving mode: both owners fate-share with
+        # this Ray job, so exit terminates serving, routers and GPU holdings.
+        serving = startup.serving = ServingCluster.options(**options).remote(args, restore_plan)
+        deployment = ray.get(serving.attach_training.remote(args, ray.get_runtime_context().get_job_id()))
+        placements, restore_plan = deployment.placements, deployment.restore_plan
+        startup.placements = placements
+        for key, value in deployment.routers.items():
+            setattr(args, key, value)
     if args.rollout_data_transport == "nixl":
         options["enable_tensor_transport"] = True
     manager = startup.manager = RolloutManager.options(**options).remote(
@@ -359,7 +376,11 @@ def _attach_rollout_manager(startup):
         resume = ray.get(manager.attach_training.remote(args, deployment))
         restore_plan, reused = resume.restore_plan, resume.reused
         args = startup.args = resume.apply(args)
-        logger.info("%s serving session %s", "Reusing" if reused else "Created", name)
+        logger.info(
+            "%s serving session %s",
+            "Reusing" if reused else "Created",
+            session_name or "<job-scoped>",
+        )
     num_rollout_per_epoch = None
     if args.num_rollout is None:
         num_rollout_per_epoch = ray.get(manager.get_num_rollout_per_epoch.remote())

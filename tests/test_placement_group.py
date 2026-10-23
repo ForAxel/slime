@@ -1,13 +1,19 @@
 import sys
+import uuid
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+import ray
+from ray.cluster_utils import Cluster
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from slime.ray import placement_group
 from slime.ray.placement_group import _create_placement_group, _get_placement_group_layout
 
 NUM_GPUS = 0
@@ -48,6 +54,126 @@ def test_placement_group_layout(overrides, expected):
 
 def test_create_zero_gpu_placement_group_is_empty():
     assert _create_placement_group(0) == (None, [], [])
+
+
+@pytest.mark.parametrize("retain_serving", [True, False])
+def test_internal_serving_lifetime_can_be_disabled(monkeypatch, retain_serving):
+    serving_options = []
+    manager_options = []
+    deployment = SimpleNamespace(
+        placements={"rollout": ("rollout_pg", [], [])},
+        restore_plan=None,
+        routers={},
+        reused=False,
+    )
+    serving = SimpleNamespace(attach_training=SimpleNamespace(remote=Mock(return_value="serving-attach")))
+    resume = SimpleNamespace(restore_plan=None, reused=False, apply=lambda args: args)
+    manager = SimpleNamespace(
+        attach_training=SimpleNamespace(remote=Mock(return_value="manager-attach")),
+    )
+
+    class ActorFactory:
+        def __init__(self, actor, calls):
+            self.actor = actor
+            self.calls = calls
+
+        def options(self, **options):
+            self.calls.append(options)
+            return SimpleNamespace(remote=Mock(return_value=self.actor))
+
+    from slime.ray import rollout
+    from slime.ray import serving as serving_module
+
+    monkeypatch.setattr(serving_module, "ServingCluster", ActorFactory(serving, serving_options))
+    monkeypatch.setattr(rollout, "RolloutManager", ActorFactory(manager, manager_options))
+    monkeypatch.setattr(
+        placement_group.ray,
+        "get",
+        lambda ref, timeout=None: deployment if ref == "serving-attach" else resume,
+    )
+    monkeypatch.setattr(
+        placement_group.ray,
+        "get_runtime_context",
+        lambda: SimpleNamespace(get_job_id=lambda: "job"),
+    )
+
+    args = SimpleNamespace(
+        retain_serving=retain_serving,
+        rollout_external=False,
+        rollout_data_transport="object-store",
+        rollout_session_id="demo",
+        num_rollout=1,
+        check_weight_update_equal=False,
+        offload_rollout=False,
+    )
+    placement_group._attach_rollout_manager(placement_group.RolloutStartup(args))
+
+    lifecycle_keys = {"name", "namespace", "lifetime", "get_if_exists"}
+    for options in (serving_options[0], manager_options[0]):
+        if retain_serving:
+            assert lifecycle_keys <= options.keys()
+        else:
+            assert lifecycle_keys.isdisjoint(options)
+
+
+def test_retain_serving_is_enabled_unless_explicitly_disabled():
+    from argparse import ArgumentParser
+
+    from slime.utils.arguments import get_slime_extra_args_provider
+
+    parser = ArgumentParser()
+    get_slime_extra_args_provider()(parser)
+    required = ["--rollout-batch-size", "1"]
+
+    assert parser.parse_args(required).retain_serving is True
+    assert parser.parse_args([*required, "--disable-retain-serving"]).retain_serving is False
+
+
+@ray.remote
+class _LifetimeProbe:
+    def ready(self):
+        return True
+
+
+@pytest.fixture(scope="module")
+def ray_cluster():
+    cluster = Cluster()
+    try:
+        cluster.add_node(num_cpus=1, num_gpus=0, include_dashboard=False)
+        ray.init(address=cluster.address, include_dashboard=False, ignore_reinit_error=True, log_to_driver=False)
+        yield cluster.address
+    finally:
+        ray.shutdown()
+        cluster.shutdown()
+
+
+def test_ray_job_lifetime_contract_underpinning_disable_retain_serving(ray_cluster):
+    namespace = f"serving-lifetime-{uuid.uuid4().hex}"
+    job_actor_name = "job-scoped"
+    detached_actor_name = "detached"
+
+    job_actor = _LifetimeProbe.options(name=job_actor_name, namespace=namespace).remote()
+    detached_actor = _LifetimeProbe.options(
+        name=detached_actor_name, namespace=namespace, lifetime="detached"
+    ).remote()
+    ray.get([job_actor.ready.remote(), detached_actor.ready.remote()], timeout=30)
+
+    ray.shutdown()
+    ray.init(
+        address=ray_cluster,
+        namespace=namespace,
+        include_dashboard=False,
+        ignore_reinit_error=True,
+        log_to_driver=False,
+    )
+    try:
+        with pytest.raises(ValueError, match="Failed to look up actor"):
+            ray.get_actor(job_actor_name, namespace=namespace)
+        surviving_actor = ray.get_actor(detached_actor_name, namespace=namespace)
+        assert ray.get(surviving_actor.ready.remote(), timeout=30)
+        ray.kill(surviving_actor, no_restart=True)
+    finally:
+        ray.shutdown()
 
 
 if __name__ == "__main__":

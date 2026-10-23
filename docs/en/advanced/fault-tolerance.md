@@ -1,16 +1,18 @@
 # Fault Tolerance
 
-slime checks SGLang engines, removes failed engines from service, and restarts them before the next weight update. When you use straw transport or save rollout debug data, you can also retain the serving cluster after a Megatron failure, adjust the training configuration, and resume training.
+slime checks SGLang engines, removes failed engines from service, and restarts them before the next weight update. The built-in serving cluster is retained across Ray jobs by default, so training can resume after a Megatron failure with an adjusted configuration. Pass `--disable-retain-serving` explicitly to make serving share the job lifetime instead. Straw transport or saved rollout debug data additionally enables training-batch replay.
 
-These features are enabled by default for serving clusters started by slime. You do not need `--use-fault-tolerance`; the flag remains for compatibility with older commands. External serving clusters retain their existing policy.
+The built-in serving cluster uses a detached owner by default, so `ServingCluster`, `RolloutManager`, and their GPU resources survive training failures and `ray job stop`. Only `--disable-retain-serving` changes them to the Ray job lifetime. Cross-job recovery does not require `--use-fault-tolerance`; that flag remains for compatibility with older commands and the external-serving policy.
+
+Before switching from the default retained mode to `--disable-retain-serving`, stop the old job and clean up both detached owners in the `slime-training-recovery` namespace: `<session>:serving` and `<session>`. Call `dispose()` on each, then `ray.kill(..., no_restart=True)`; cleaning up only `ServingCluster` leaves `RolloutManager` behind. The switch controls the new job's actor lifetime; it does not terminate detached sessions left by earlier runs.
 
 ## Resuming After a Megatron Failure
 
-This recovery workflow requires the **Ray cluster to remain running**. Losing the training driver or `RolloutManager` does not destroy the SGLang engines or routers. When you resubmit training, slime finds and reuses the existing serving cluster. This requires no changes to SGLang and does not automatically retry the training job.
+This recovery workflow requires that `--disable-retain-serving` is not set and the **Ray cluster remain running**. Losing the training driver or `RolloutManager` does not destroy the SGLang engines or routers while retention is enabled. When you resubmit training, slime finds and reuses the existing serving cluster. This requires no changes to SGLang and does not automatically retry the training job.
 
 ### Retain Recovery Data from the First Launch
 
-Choose either option below. slime automatically persists recovery data in these modes, independently of `--use-fault-tolerance`.
+Serving retention is enabled by default. Choose either persistence option below. slime automatically persists recovery data in these modes, independently of `--use-fault-tolerance`.
 
 Use straw to store rollout and training data:
 
@@ -56,7 +58,7 @@ Megatron restores RNG state when the parallel layout is compatible and reinitial
 
 ## Finding the Existing Serving Cluster
 
-slime manages the serving cluster through a named Ray actor. A new job looks up that actor by its session name and gets the existing router and engine information from it. It does not scan for router processes.
+By default, slime manages the serving cluster through a named Ray actor. A new job looks up that actor by its session name and gets the existing router and engine information from it. It does not scan for router processes. With `--disable-retain-serving`, slime does not create a cross-job actor name.
 
 Set `--rollout-session-id` to choose a session identity explicitly. Otherwise, slime selects an identity in the following order and hashes it to produce a stable name:
 
@@ -69,13 +71,13 @@ Use the same identity for both attempts of a training run. Independent runs shou
 
 Three components handle recovery:
 
-- `ServingCluster` manages routers, SGLang engines, GPU resources, the straw queue controller, and the weight-update lock. It is a named, detached Ray actor that survives the job that created it.
-- `RolloutManager` handles generation, data reading, sample conversion, and training-data partitioning. It can be reused or recreated after it exits; recreating it does not destroy resources held by `ServingCluster`.
+- `ServingCluster` manages routers, SGLang engines, GPU resources, the straw queue controller, and the weight-update lock. By default it is a named, detached Ray actor that survives the job that created it; `--disable-retain-serving` makes it share that job's lifetime.
+- `RolloutManager` handles generation, data reading, sample conversion, and training-data partitioning. In the default retained mode it can be reused or recreated after it exits; recreating it does not destroy resources held by `ServingCluster`.
 - `TrainingRecovery` owns the model checkpoint boundary and retains the batches needed after it. The straw accepted log owns raw and converted batch receipts; recovery reconciles those receipts if a manager or RPC fails before the journal is updated. A converted batch is stored once, and each DP rank receives an index view that can be rebuilt for a new parallel configuration.
 
-If `RolloutManager` survives, it pauses admission of new generation tasks. If it exits, its replacement reconnects to `ServingCluster`, restores data-source progress, and uses the queue controller to prevent old readers from taking more tasks. Completed prefetch results that have not reached training remain available. Trainer processes are also registered with `ServingCluster`, so it can clean up old trainers even after the manager exits.
+In the default retained mode, if `RolloutManager` survives, it pauses admission of new generation tasks. If it exits, its replacement reconnects to `ServingCluster`, restores data-source progress, and uses the queue controller to prevent old readers from taking more tasks. Completed prefetch results that have not reached training remain available. Trainer processes are also registered with `ServingCluster`, so it can clean up old trainers even after the manager exits.
 
-The driver owns the lifetime of each training attempt, including rollback when startup fails after attaching to serving. On failure, it gives the manager a bounded opportunity to pause, then asks serving to release trainers directly. A manager that fails to pause is terminated and recreated on the next attempt. Successful completion disposes the manager and serving independently, so an error in a custom data source's `close()` does not skip serving cleanup. Cleanup errors are logged without replacing the original training failure.
+The driver owns the lifetime of each training attempt, including rollback when startup fails after attaching to serving. With retained serving, failure gives the manager a bounded opportunity to pause before serving releases its trainers directly; a manager that fails to pause is terminated and recreated on the next attempt. With `--disable-retain-serving`, failure cleans up both manager and serving immediately. Successful completion always disposes both owners independently, so an error in a custom data source's `close()` does not skip serving cleanup. Cleanup errors are logged without replacing the original training failure.
 
 `--rollout-cleanup-timeout` defaults to **60 seconds** for detaching or disposing an attempt. It is independent of engine health-check and warmup timeouts. Cleanup attempts remaining resource releases even after a step fails; blocked actors are terminated when graceful disposal times out.
 
@@ -120,7 +122,7 @@ For slow generation requests, use [Trace Viewer](../developer_guide/trace.md) to
 
 ## Recovery Scope and Limitations
 
-Without straw or rollout debug dumps, you can still retain the serving cluster, but you cannot replay training batches after the last checkpoint.
+Without straw or rollout debug dumps, serving is still retained by default, but training batches after the last checkpoint cannot be replayed. With `--disable-retain-serving`, serving is released with the job.
 
 Recreating `RolloutManager` supports the built-in data sources. Custom sources need compatible `state_dict` / `load_state_dict` methods and queue controllers that survive independently of the manager. Data-source constructors and rollout hook signatures are unchanged.
 

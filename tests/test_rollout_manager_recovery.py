@@ -473,7 +473,11 @@ def test_driver_detach_releases_real_trainer_when_manager_cannot_pause(cluster, 
     try:
         identity = ray.get(serving.state.remote(), timeout=30)[0]
         ray.get([manager.ready.remote(), trainer.pid.remote()], timeout=30)
-        startup = RolloutStartup(SimpleNamespace(rollout_cleanup_timeout=2), manager=manager, serving=serving)
+        startup = RolloutStartup(
+            SimpleNamespace(rollout_cleanup_timeout=2, retain_serving=True),
+            manager=manager,
+            serving=serving,
+        )
         start = time.monotonic()
         startup.close(failed=True)
         assert time.monotonic() - start < 5
